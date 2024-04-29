@@ -4,7 +4,7 @@ use wgpu::util::DeviceExt;
 use winit::{
     event::*,
     event_loop::EventLoop,
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::{Key, KeyCode, NamedKey},
     window::{Window, WindowBuilder},
 };
 
@@ -391,7 +391,7 @@ pub async fn run() {
                                 event:
                                     KeyEvent {
                                         state: ElementState::Pressed,
-                                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                                        logical_key: Key::Named(NamedKey::Escape),
                                         ..
                                     },
                                 ..

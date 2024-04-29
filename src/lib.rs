@@ -1,10 +1,11 @@
 use std::iter;
 
+use texture::Texture;
 use wgpu::util::DeviceExt;
 use winit::{
     event::*,
     event_loop::EventLoop,
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::{Key, KeyCode, NamedKey},
     window::{Window, WindowBuilder},
 };
 
@@ -67,7 +68,39 @@ const VERTICES: &[Vertex] = &[
 
 const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4, /* padding */ 0];
 
-struct State<'a> {
+const TEXTURES: &[(&str, &[u8])] = &[
+    ("happy-tree.png", include_bytes!("./happy-tree.png")),
+    (
+        "happy-tree-cartoon.png",
+        include_bytes!("./happy-tree-cartoon.png"),
+    ),
+];
+
+trait CycleAble: Iterator<Item = &TextureState> + Clone;
+
+impl<T> CycleAble for T where T: Iterator<Item = &TextureState> + Clone {}
+
+struct TextureState<'a, T> {
+    cycler: Box<std::iter::Cycle<dyn >>,
+    current_ref: &'a TextureData,
+}
+
+impl<'a> TextureState<'a>
+{
+    fn switch_next(&mut self) {
+        self.current_ref = self.cycler.next().unwrap();
+    }
+}
+
+struct TextureData {
+    diffuse_texture: texture::Texture,
+    diffuse_bind_group: wgpu::BindGroup,
+}
+
+struct State<'a, T>
+where
+    T: Iterator<Item = &'a TextureData>,
+{
     surface: wgpu::Surface<'a>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -77,15 +110,16 @@ struct State<'a> {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
-    // NEW!
-    #[allow(dead_code)]
-    diffuse_texture: texture::Texture,
-    diffuse_bind_group: wgpu::BindGroup,
+    textures: Vec<TextureData>,
+    texture_state: TextureState<'a>,
     window: &'a Window,
 }
 
-impl<'a> State<'a> {
-    async fn new(window: &'a Window) -> State<'a> {
+impl<'a> State<'a, >
+where
+    T: Iterator<Item = &'a TextureData>,
+{
+    async fn new(window: &'a Window) -> State<'a, T> {
         let size = window.inner_size();
 
         // The instance is a handle to our GPU
@@ -147,10 +181,6 @@ impl<'a> State<'a> {
             desired_maximum_frame_latency: 2,
         };
 
-        let diffuse_bytes = include_bytes!("happy-tree.png");
-        let diffuse_texture =
-            texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
-
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -174,20 +204,41 @@ impl<'a> State<'a> {
                 label: Some("texture_bind_group_layout"),
             });
 
-        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                },
-            ],
-            label: Some("diffuse_bind_group"),
-        });
+        let norm_diffuse_bytes = include_bytes!("happy-tree.png");
+        let norm_diffuse_texture =
+            texture::Texture::from_bytes(&device, &queue, norm_diffuse_bytes, "happy-tree.png")
+                .unwrap();
+
+        let textures: Vec<TextureData> = TEXTURES
+            .iter()
+            .map(|t| {
+                let texture = texture::Texture::from_bytes(&device, &queue, t.1, t.0).unwrap();
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &texture_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&texture.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&texture.sampler),
+                        },
+                    ],
+                    label: Some("diffuse_bind_group"),
+                });
+                TextureData {
+                    diffuse_texture: texture,
+                    diffuse_bind_group: bind_group,
+                }
+            })
+            .collect();
+        let texture_cycler = (0..textures.len()).map(|i| &textures[i]).cycle();
+        let current_ref = texture_cycler.next().unwrap();
+        let texture_state = TextureState {
+            cycler: texture_cycler,
+            current_ref,
+        };
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
@@ -267,8 +318,8 @@ impl<'a> State<'a> {
             vertex_buffer,
             index_buffer,
             num_indices,
-            diffuse_texture,
-            diffuse_bind_group,
+            textures,
+            texture_state,
             window,
         }
     }
@@ -326,8 +377,13 @@ impl<'a> State<'a> {
                 timestamp_writes: None,
             });
 
+            let texture_bind_group = match self.texture_state {
+                TextureState::Norm => &self.norm_texture.diffuse_bind_group,
+                TextureState::Alt => &self.alt_texture.diffuse_bind_group,
+            };
+
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
@@ -391,11 +447,20 @@ pub async fn run() {
                                 event:
                                     KeyEvent {
                                         state: ElementState::Pressed,
-                                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                                        logical_key: Key::Named(NamedKey::Escape),
                                         ..
                                     },
                                 ..
                             } => control_flow.exit(),
+                            WindowEvent::KeyboardInput {
+                                event:
+                                    KeyEvent {
+                                        state: ElementState::Pressed,
+                                        logical_key: Key::Named(NamedKey::Space | NamedKey::Tab),
+                                        ..
+                                    },
+                                ..
+                            } => state.texture_state.switch(),
                             WindowEvent::Resized(physical_size) => {
                                 surface_configured = true;
                                 state.resize(*physical_size);
