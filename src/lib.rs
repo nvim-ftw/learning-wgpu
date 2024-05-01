@@ -1,7 +1,7 @@
 use std::iter;
 
 use texture::Texture;
-use wgpu::util::DeviceExt;
+use wgpu::util::{DeviceExt, RenderEncoder};
 use winit::{
     event::*,
     event_loop::EventLoop,
@@ -18,7 +18,7 @@ mod texture;
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 3],
-    tex_coords: [f32; 2],
+    color: [f32; 3],
 }
 
 impl Vertex {
@@ -36,7 +36,7 @@ impl Vertex {
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
+                    format: wgpu::VertexFormat::Float32x3,
                 },
             ],
         }
@@ -45,28 +45,29 @@ impl Vertex {
 
 const VERTICES: &[Vertex] = &[
     Vertex {
-        position: [-0.0868241, 0.49240386, 0.0],
-        tex_coords: [0.4131759, 0.00759614],
-    }, // A
+        position: [-1.0, 1.0, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
     Vertex {
-        position: [-0.49513406, 0.06958647, 0.0],
-        tex_coords: [0.0048659444, 0.43041354],
-    }, // B
+        position: [1.0, 1.0, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
     Vertex {
-        position: [-0.21918549, -0.44939706, 0.0],
-        tex_coords: [0.28081453, 0.949397],
-    }, // C
+        position: [-1.0, -1.0, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
     Vertex {
-        position: [0.35966998, -0.3473291, 0.0],
-        tex_coords: [0.85967, 0.84732914],
-    }, // D
-    Vertex {
-        position: [0.44147372, 0.2347359, 0.0],
-        tex_coords: [0.9414737, 0.2652641],
-    }, // E
+        position: [1.0, -1.0, 0.0],
+        color: [0.0, 0.0, 0.0],
+    },
 ];
 
-const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4, /* padding */ 0];
+const INDICES: &[u16] = &[0, 2, 1, 1, 2, 3, /* padding */ 0];
+
+#[repr(C)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+struct Radius(f32);
+const CIRCLE_RADIUS: Radius = Radius(0.75);
 
 enum TextureState {
     Norm,
@@ -98,10 +99,10 @@ struct State<'a> {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
-    norm_texture: TextureData,
-    alt_texture: TextureData,
-    texture_state: TextureState,
+    radius_bindgroup: wgpu::BindGroup,
     window: &'a Window,
+    size_bindgroup: wgpu::BindGroup,
+    size_buffer: wgpu::Buffer,
 }
 
 impl<'a> State<'a> {
@@ -167,88 +168,82 @@ impl<'a> State<'a> {
             desired_maximum_frame_latency: 2,
         };
 
-        let norm_diffuse_bytes = include_bytes!("happy-tree.png");
-        let norm_diffuse_texture =
-            texture::Texture::from_bytes(&device, &queue, norm_diffuse_bytes, "happy-tree.png")
-                .unwrap();
-
-        let texture_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-                label: Some("texture_bind_group_layout"),
-            });
-
-        let norm_diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&norm_diffuse_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&norm_diffuse_texture.sampler),
-                },
-            ],
-            label: Some("diffuse_bind_group"),
-        });
-
-        let norm_texture = TextureData {
-            diffuse_texture: norm_diffuse_texture,
-            diffuse_bind_group: norm_diffuse_bind_group,
-        };
-
-        let alt_diffuse_bytes = include_bytes!("happy-tree-cartoon.png");
-        let alt_diffuse_texture =
-            texture::Texture::from_bytes(&device, &queue, alt_diffuse_bytes, "happy-tree.png")
-                .unwrap();
-
-        let alt_diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&alt_diffuse_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&alt_diffuse_texture.sampler),
-                },
-            ],
-            label: Some("diffuse_bind_group"),
-        });
-
-        let alt_texture = TextureData {
-            diffuse_texture: alt_diffuse_texture,
-            diffuse_bind_group: alt_diffuse_bind_group,
-        };
-
+        let shader_str = std::fs::read_to_string("src/shader.wgsl").unwrap();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl((&shader_str).into()),
+        });
+
+        let size_bindgroup_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("aspect_ratio_bindgroup_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::all(),
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[size.width, size.height]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let size_buffer_binding = wgpu::BufferBinding {
+            buffer: &size_buffer,
+            offset: 0 as wgpu::BufferAddress,
+            size: Some(std::num::NonZeroU64::new(8).unwrap()),
+        };
+        let size_bindgroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aspect_ratio_bind_group"),
+            layout: &size_bindgroup_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(size_buffer_binding),
+            }],
+        });
+
+        let radius_bindgroup_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("radius_bindgroup_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let radius_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[CIRCLE_RADIUS]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let radius_buffer_binding = wgpu::BufferBinding {
+            buffer: &radius_buffer,
+            offset: 0 as wgpu::BufferAddress,
+            size: None,
+        };
+        let radius_bindgroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("radius_bind_group"),
+            layout: &radius_bindgroup_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(radius_buffer_binding),
+            }],
         });
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&texture_bind_group_layout],
+                bind_group_layouts: &[&size_bindgroup_layout, &radius_bindgroup_layout],
                 push_constant_ranges: &[],
             });
 
@@ -318,24 +313,31 @@ impl<'a> State<'a> {
             vertex_buffer,
             index_buffer,
             num_indices,
-            texture_state: TextureState::Norm,
-            norm_texture,
-            alt_texture,
             window,
+            radius_bindgroup,
+            size_bindgroup,
+            size_buffer,
         }
     }
 
     pub fn window(&self) -> &Window {
-        &self.window
+        self.window
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
         }
+        self.size = new_size;
+        self.config.width = new_size.width;
+        self.config.height = new_size.height;
+        self.surface.configure(&self.device, &self.config);
+
+        self.queue.write_buffer(
+            &self.size_buffer,
+            0 as wgpu::BufferAddress,
+            bytemuck::cast_slice(&[new_size.width, new_size.height]),
+        );
     }
 
     #[allow(unused_variables)]
@@ -378,13 +380,9 @@ impl<'a> State<'a> {
                 timestamp_writes: None,
             });
 
-            let texture_bind_group = match self.texture_state {
-                TextureState::Norm => &self.norm_texture.diffuse_bind_group,
-                TextureState::Alt => &self.alt_texture.diffuse_bind_group,
-            };
-
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, texture_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.size_bindgroup, &[]);
+            render_pass.set_bind_group(1, &self.radius_bindgroup, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
@@ -453,15 +451,6 @@ pub async fn run() {
                                     },
                                 ..
                             } => control_flow.exit(),
-                            WindowEvent::KeyboardInput {
-                                event:
-                                    KeyEvent {
-                                        state: ElementState::Pressed,
-                                        logical_key: Key::Named(NamedKey::Space | NamedKey::Tab),
-                                        ..
-                                    },
-                                ..
-                            } => state.texture_state.switch(),
                             WindowEvent::Resized(physical_size) => {
                                 surface_configured = true;
                                 state.resize(*physical_size);
