@@ -1,5 +1,6 @@
 use std::iter;
 
+use texture::Texture;
 use wgpu::util::DeviceExt;
 use winit::{
     event::*,
@@ -67,6 +68,26 @@ const VERTICES: &[Vertex] = &[
 
 const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4, /* padding */ 0];
 
+enum TextureState {
+    Norm,
+    Alt,
+}
+
+impl TextureState {
+    fn switch(&mut self) {
+        *self = match self {
+            Self::Norm => TextureState::Alt,
+
+            Self::Alt => TextureState::Norm,
+        }
+    }
+}
+
+struct TextureData {
+    diffuse_texture: texture::Texture,
+    diffuse_bind_group: wgpu::BindGroup,
+}
+
 struct State<'a> {
     surface: wgpu::Surface<'a>,
     device: wgpu::Device,
@@ -77,10 +98,9 @@ struct State<'a> {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
-    // NEW!
-    #[allow(dead_code)]
-    diffuse_texture: texture::Texture,
-    diffuse_bind_group: wgpu::BindGroup,
+    norm_texture: TextureData,
+    alt_texture: TextureData,
+    texture_state: TextureState,
     window: &'a Window,
 }
 
@@ -147,9 +167,10 @@ impl<'a> State<'a> {
             desired_maximum_frame_latency: 2,
         };
 
-        let diffuse_bytes = include_bytes!("happy-tree.png");
-        let diffuse_texture =
-            texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
+        let norm_diffuse_bytes = include_bytes!("happy-tree.png");
+        let norm_diffuse_texture =
+            texture::Texture::from_bytes(&device, &queue, norm_diffuse_bytes, "happy-tree.png")
+                .unwrap();
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -174,20 +195,50 @@ impl<'a> State<'a> {
                 label: Some("texture_bind_group_layout"),
             });
 
-        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let norm_diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
+                    resource: wgpu::BindingResource::TextureView(&norm_diffuse_texture.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                    resource: wgpu::BindingResource::Sampler(&norm_diffuse_texture.sampler),
                 },
             ],
             label: Some("diffuse_bind_group"),
         });
+
+        let norm_texture = TextureData {
+            diffuse_texture: norm_diffuse_texture,
+            diffuse_bind_group: norm_diffuse_bind_group,
+        };
+
+        let alt_diffuse_bytes = include_bytes!("happy-tree-cartoon.png");
+        let alt_diffuse_texture =
+            texture::Texture::from_bytes(&device, &queue, alt_diffuse_bytes, "happy-tree.png")
+                .unwrap();
+
+        let alt_diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&alt_diffuse_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&alt_diffuse_texture.sampler),
+                },
+            ],
+            label: Some("diffuse_bind_group"),
+        });
+
+        let alt_texture = TextureData {
+            diffuse_texture: alt_diffuse_texture,
+            diffuse_bind_group: alt_diffuse_bind_group,
+        };
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
@@ -267,8 +318,9 @@ impl<'a> State<'a> {
             vertex_buffer,
             index_buffer,
             num_indices,
-            diffuse_texture,
-            diffuse_bind_group,
+            texture_state: TextureState::Norm,
+            norm_texture,
+            alt_texture,
             window,
         }
     }
@@ -326,8 +378,13 @@ impl<'a> State<'a> {
                 timestamp_writes: None,
             });
 
+            let texture_bind_group = match self.texture_state {
+                TextureState::Norm => &self.norm_texture.diffuse_bind_group,
+                TextureState::Alt => &self.alt_texture.diffuse_bind_group,
+            };
+
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
@@ -396,6 +453,15 @@ pub async fn run() {
                                     },
                                 ..
                             } => control_flow.exit(),
+                            WindowEvent::KeyboardInput {
+                                event:
+                                    KeyEvent {
+                                        state: ElementState::Pressed,
+                                        logical_key: Key::Named(NamedKey::Space | NamedKey::Tab),
+                                        ..
+                                    },
+                                ..
+                            } => state.texture_state.switch(),
                             WindowEvent::Resized(physical_size) => {
                                 surface_configured = true;
                                 state.resize(*physical_size);
