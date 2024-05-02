@@ -204,6 +204,8 @@ struct State<'a> {
     camera_controller: camera::CameraController,
     instances: Vec<Instance>,
     instance_buffer: wgpu::Buffer,
+    res_buffer: wgpu::Buffer,
+    res_bind_group: wgpu::BindGroup,
 }
 
 impl<'a> State<'a> {
@@ -356,6 +358,36 @@ impl<'a> State<'a> {
 
         let camera_controller = camera::CameraController::new(0.01);
 
+        let res_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Resolution Buffer"),
+            contents: bytemuck::cast_slice(&[size.width as f32, size.height as f32]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let res_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Resolution Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::all(),
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let res_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Resolution Bind Group"),
+            layout: &res_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: res_buffer.as_entire_binding(),
+            }],
+        });
+
         let instances = (0..NUM_INSTANCES_PER_ROW)
             .flat_map(|z| {
                 (0..NUM_INSTANCES_PER_ROW).map(move |x| {
@@ -365,14 +397,18 @@ impl<'a> State<'a> {
                         z: z as f32,
                     } - INSTANCE_DISPLACEMENT;
 
-                    let rotation = if position.is_zero() {
-                        cgmath::Quaternion::from_axis_angle(
-                            cgmath::Vector3::unit_z(),
-                            cgmath::Deg(0.0),
-                        )
-                    } else {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
-                    };
+                    // let rotation = if position.is_zero() {
+                    //     cgmath::Quaternion::from_axis_angle(
+                    //         cgmath::Vector3::unit_z(),
+                    //         cgmath::Deg(0.0),
+                    //     )
+                    // } else {
+                    //     cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
+                    // };
+                    let rotation = cgmath::Quaternion::from_axis_angle(
+                        cgmath::Vector3::unit_z(),
+                        cgmath::Deg(0.0),
+                    );
 
                     Instance { position, rotation }
                 })
@@ -386,15 +422,20 @@ impl<'a> State<'a> {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        let shader_string = std::fs::read_to_string("src/shader.wgsl").unwrap();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shader_string.into()),
         });
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&texture_bind_group_layout, &camera_bind_group_layout],
+                bind_group_layouts: &[
+                    &texture_bind_group_layout,
+                    &camera_bind_group_layout,
+                    &res_bind_group_layout,
+                ],
                 push_constant_ranges: &[],
             });
 
@@ -474,6 +515,8 @@ impl<'a> State<'a> {
             camera_controller,
             instances,
             instance_buffer,
+            res_bind_group,
+            res_buffer,
         }
     }
 
@@ -482,12 +525,19 @@ impl<'a> State<'a> {
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
         }
+        self.size = new_size;
+        self.config.width = new_size.width;
+        self.config.height = new_size.height;
+        self.surface.configure(&self.device, &self.config);
+
+        self.queue.write_buffer(
+            &self.res_buffer,
+            0 as wgpu::BufferAddress,
+            bytemuck::cast_slice(&[new_size.width, new_size.height]),
+        );
     }
 
     #[allow(unused_variables)]
@@ -541,12 +591,15 @@ impl<'a> State<'a> {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(2, &self.res_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
             render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
+
+            render_pass.set_pipeline(&self.render_pipeline);
         }
 
         self.queue.submit(iter::once(encoder.finish()));
